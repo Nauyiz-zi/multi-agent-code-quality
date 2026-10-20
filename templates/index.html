@@ -1,0 +1,300 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>多智能体代码质量保障系统</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3/dist/purify.min.js"></script>
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: system-ui, "Microsoft YaHei", sans-serif; margin: 0; background: #f5f7fa; color: #1f2933; }
+    header { background: linear-gradient(135deg, #2563eb, #4f46e5); color: #fff; padding: 22px 24px; }
+    header h1 { margin: 0; font-size: 22px; }
+    header p { margin: 6px 0 0; opacity: .85; font-size: 13px; }
+    main { max-width: 900px; margin: 20px auto; padding: 0 16px 40px; }
+    .card { background: #fff; border-radius: 10px; padding: 16px 20px; margin-bottom: 16px; box-shadow: 0 1px 4px rgba(0,0,0,.06); }
+    .card h2 { margin: 0 0 12px; font-size: 16px; }
+    .row { display: flex; align-items: center; gap: 8px; margin: 10px 0; flex-wrap: wrap; }
+    .row > label { width: 90px; font-size: 13px; color: #52606d; flex-shrink: 0; }
+    input, select { padding: 8px 10px; border: 1px solid #cbd2d9; border-radius: 6px; font-size: 14px; }
+    #path-input { flex: 1; min-width: 260px; font-family: ui-monospace, Consolas, monospace; }
+    button { padding: 8px 18px; border: none; border-radius: 6px; background: #2563eb; color: #fff; cursor: pointer; font-size: 14px; }
+    button:disabled { background: #9aa5b1; cursor: not-allowed; }
+    #start-btn { margin-left: auto; }
+    .hidden { display: none; }
+    #trace { max-height: 320px; overflow-y: auto; background: #0f172a; color: #e2e8f0; border-radius: 8px; padding: 12px 14px; font-size: 13px; }
+    .step { margin-bottom: 10px; }
+    .step-title { color: #93c5fd; font-weight: 600; margin-bottom: 4px; }
+    .trace-row { margin: 3px 0 3px 16px; }
+    .trace-row code { color: #fbbf24; font-family: ui-monospace, Consolas, monospace; }
+    .badge { display: inline-block; padding: 1px 8px; border-radius: 10px; font-size: 12px; margin-right: 6px; }
+    .badge.tool { background: #334155; color: #cbd5e1; }
+    .badge.ok { background: #065f46; color: #a7f3d0; }
+    .badge.fail { background: #7f1d1d; color: #fecaca; }
+    .badge.warn { background: #78350f; color: #fde68a; }
+    .done-mark { display: inline-block; margin-right: 6px; color: #4ade80; }
+    .spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid #93c5fd; border-top-color: transparent; border-radius: 50%; margin-right: 6px; animation: spin 1s linear infinite; vertical-align: middle; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    #report { line-height: 1.7; font-size: 14px; }
+    #report h1, #report h2 { border-bottom: 1px solid #e4e7eb; padding-bottom: 6px; }
+    #report pre { background: #f1f5f9; padding: 10px; border-radius: 6px; overflow-x: auto; }
+    #report code { font-family: ui-monospace, Consolas, monospace; font-size: 13px; }
+    .muted { color: #7b8794; }
+    .error-box { background: #fef2f2; border: 1px solid #fca5a5; color: #b91c1c; padding: 12px; border-radius: 8px; }
+    #upload-status { font-size: 12px; color: #52606d; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>代码质量保障系统</h1>
+    <p>多智能体协作的代码审查、自动修复与独立验证平台</p>
+  </header>
+
+  <main>
+    <section class="card">
+      <div class="row">
+        <label>文件路径</label>
+        <input id="path-input" type="text" placeholder="例如 examples/buggy_code.py">
+      </div>
+      <div class="row">
+        <label>或上传文件</label>
+        <input id="file-upload" type="file">
+        <span id="upload-status"></span>
+      </div>
+      <div class="row">
+        <label>最大步数</label>
+        <input id="max-steps" type="number" min="1" max="20" value="8" style="width: 80px;">
+        <button id="start-btn" type="button">运行</button>
+      </div>
+    </section>
+
+    <section class="card hidden" id="trace-card">
+      <h2>执行轨迹</h2>
+      <div id="trace"></div>
+    </section>
+
+    <section class="card hidden" id="report-card">
+      <h2>审查报告</h2>
+      <div id="report"></div>
+    </section>
+  </main>
+
+  <script>
+    const pathInput = document.getElementById('path-input');
+    const fileUpload = document.getElementById('file-upload');
+    const uploadStatus = document.getElementById('upload-status');
+    const maxSteps = document.getElementById('max-steps');
+    const startBtn = document.getElementById('start-btn');
+    const traceEl = document.getElementById('trace');
+    const reportEl = document.getElementById('report');
+    let currentStepBlock = null;
+    let running = false;
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    fileUpload.addEventListener('change', async () => {
+      const file = fileUpload.files[0];
+      if (!file) return;
+      uploadStatus.textContent = '上传中…';
+      const formData = new FormData();
+      formData.append('file', file);
+      try {
+        const res = await fetch('/upload', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (data.ok) {
+          pathInput.value = data.path;
+          uploadStatus.textContent = '已上传：' + data.original_name;
+        } else {
+          uploadStatus.textContent = '上传失败：' + data.error;
+        }
+      } catch (err) {
+        uploadStatus.textContent = '上传失败：' + err.message;
+      }
+    });
+
+    function scrollTrace() {
+      traceEl.scrollTop = traceEl.scrollHeight;
+    }
+
+    function addStep(step) {
+      currentStepBlock = document.createElement('div');
+      currentStepBlock.className = 'step';
+      const title = document.createElement('div');
+      title.className = 'step-title';
+      title.innerHTML = '<span class="spinner"></span>第 ' + step + ' 步：正在推理…';
+      currentStepBlock.appendChild(title);
+      traceEl.appendChild(currentStepBlock);
+      scrollTrace();
+    }
+
+    function markStepDone() {
+      if (!currentStepBlock) return;
+      const spinner = currentStepBlock.querySelector('.spinner');
+      if (spinner) {
+        spinner.className = 'done-mark';
+        spinner.textContent = '✓';
+      }
+    }
+
+    function addRow(html, cls) {
+      if (!currentStepBlock) return;
+      markStepDone();
+      const row = document.createElement('div');
+      row.className = 'trace-row' + (cls ? ' ' + cls : '');
+      row.innerHTML = html;
+      currentStepBlock.appendChild(row);
+      scrollTrace();
+    }
+
+    function renderMarkdown(text) {
+      if (window.marked) {
+        let html = marked.parse(text);
+        html = window.DOMPurify
+          ? DOMPurify.sanitize(html)
+          : html.replace(/<script[\s\S]*?<\/script>/gi, '');
+        reportEl.innerHTML = html;
+      } else {
+        reportEl.innerHTML = '<pre>' + escapeHtml(text) + '</pre>';
+      }
+    }
+
+    function handleEvent(event) {
+      if (event.type === 'step_start') {
+        addStep(event.step);
+      } else if (event.type === 'tool_call') {
+        addRow('<span class="badge tool">' + escapeHtml(event.tool) + '</span>'
+          + '<code>' + escapeHtml(JSON.stringify(event.arguments)) + '</code>');
+      } else if (event.type === 'tool_result') {
+        addRow('<span class="badge ' + (event.ok ? 'ok' : 'fail') + '">'
+          + (event.ok ? 'ok ✓' : '失败 ✗') + '</span>');
+      } else if (event.type === 'parse_error') {
+        addRow('<span class="badge warn">模型输出异常</span>'
+          + escapeHtml(event.error) + '（已要求模型重新输出）');
+      } else if (event.type === 'done') {
+        markStepDone();
+        if (event.error) {
+          reportEl.innerHTML = '<div class="error-box">审查失败：'
+            + escapeHtml(event.error) + '</div>';
+        } else {
+          renderMarkdown(event.answer);
+        }
+        running = false;
+        startBtn.disabled = false;
+      }
+    }
+
+    startBtn.addEventListener('click', async () => {
+      const path = pathInput.value.trim();
+    
+      if (!path) {
+        alert('请选择或输入要处理的文件路径');
+        return;
+      }
+    
+      if (running) return;
+    
+      running = true;
+      startBtn.disabled = true;
+    
+      document.getElementById('trace-card').classList.remove('hidden');
+      document.getElementById('report-card').classList.remove('hidden');
+    
+      traceEl.innerHTML = `
+        <div class="step">
+          <div class="step-title">
+            <span class="spinner"></span>
+            正在运行代码质量保障系统
+          </div>
+          <div class="trace-row">
+            代码审查智能体 → 代码修复智能体 → 独立验证智能体
+          </div>
+        </div>
+      `;
+    
+      reportEl.innerHTML = '<p class="muted">Workflow 执行中，请稍候…</p>';
+    
+      try {
+        const res = await fetch('/workflow', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            path: path
+          })
+        });
+    
+        const data = await res.json();
+    
+        if (!res.ok || !data.ok) {
+          throw new Error(data.error || 'Workflow 执行失败');
+        }
+    
+        traceEl.innerHTML = `
+          <div class="step">
+            <div class="step-title">
+              <span class="done-mark">✓</span>
+              Workflow 执行完成
+            </div>
+    
+            <div class="trace-row">
+              <span class="badge tool">代码审查智能体</span>
+              已生成结构化问题列表
+            </div>
+    
+            <div class="trace-row">
+              <span class="badge tool">代码修复智能体</span>
+              已生成候选修复代码
+            </div>
+    
+            <div class="trace-row">
+              <span class="badge tool">独立验证智能体</span>
+              验证状态：
+              <span class="badge ${data.status === 'passed' ? 'ok' : 'warn'}">
+                ${escapeHtml(data.status)}
+              </span>
+            </div>
+    
+            <div class="trace-row">
+              运行编号：
+              <code>${escapeHtml(data.run_id)}</code>
+            </div>
+          </div>
+        `;
+    
+        let reportHtml = '';
+    
+        if (window.marked) {
+          reportHtml += marked.parse(data.report || '');
+        } else {
+          reportHtml += '<pre>' + escapeHtml(data.report || '') + '</pre>';
+        }
+    
+        reportHtml += `
+          <h2>修改差异</h2>
+          <pre>${escapeHtml(data.diff || '没有修改差异')}</pre>
+        `;
+    
+        reportEl.innerHTML = window.DOMPurify
+          ? DOMPurify.sanitize(reportHtml)
+          : reportHtml;
+    
+      } catch (err) {
+        reportEl.innerHTML = `
+          <div class="error-box">
+            Workflow 失败：${escapeHtml(err.message)}
+          </div>
+        `;
+      } finally {
+        running = false;
+        startBtn.disabled = false;
+      }
+    });
+  </script>
+</body>
+</html>
