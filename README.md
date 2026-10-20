@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # 多智能体代码质量保障系统
 
 ## 1. 项目简介
@@ -225,3 +226,6 @@ workflow_started → review_agent_started → review_agent_finished
 - 支持目录级、多文件依赖分析。
 - 将 Workflow 事件通过 SSE 实时推送到页面。
 - 增加人工确认节点、断点恢复和运行历史查询。
+=======
+# code-review-agent-workflow
+>>>>>>> f22b013d60cf8e27d487f72190cf351eecb9c58d
