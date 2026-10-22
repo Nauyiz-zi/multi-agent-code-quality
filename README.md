@@ -106,47 +106,54 @@ code-review-agent-workflow/
 Windows PowerShell：
 
 ```powershell
-cd D:\code-review-agent-workflow
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 py -3 -m pip install -r requirements.txt
 ```
 
-如果不能激活虚拟环境，可以直接调用：
+系统通过环境变量读取大模型服务配置。项目根目录提供 `.env.example` 作为配置模板；实际运行时需在本地创建 `.env` 文件，并根据所使用的模型服务选择一种配置方式。
 
-```powershell
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+### DeepSeek
+
+```dotenv
+DEEPSEEK_API_KEY=<your-deepseek-api-key>
 ```
 
-在项目根目录 `.env` 中配置模型，例如：
+### 通义千问（DashScope）
 
-```text
-DEEPSEEK_API_KEY=你的APIKey
+```dotenv
+DASHSCOPE_API_KEY=<your-dashscope-api-key>
 ```
 
-或：
+### OpenAI 或其他 OpenAI 兼容服务
 
-```text
-OPENAI_API_KEY=你的APIKey
+```dotenv
+OPENAI_API_KEY=<your-api-key>
 OPENAI_BASE_URL=https://api.openai.com/v1
-MODEL=gpt-4o-mini
+MODEL=<model-name>
 ```
 
-密钥只保存在本地 `.env`，不要提交到仓库或压缩包中。
+也可以使用通用配置项：
+
+```dotenv
+LLM_API_KEY=<your-api-key>
+LLM_BASE_URL=<兼容 OpenAI 接口的服务地址>
+LLM_MODEL=<model-name>
+```
+
+`llm.py` 会按照以下优先级读取配置：`DEEPSEEK_API_KEY`、`DASHSCOPE_API_KEY`、`OPENAI_API_KEY`、`LLM_API_KEY`。当未检测到有效配置时，程序会提示补充 API Key。
 
 ## 7. 使用方法
 
 ### 7.1 命令行运行多智能体 Workflow
 
 ```powershell
-cd D:\code-review-agent-workflow
 .\.venv\Scripts\python.exe workflow.py examples\buggy_code.py
 ```
 
 ### 7.2 启动 Web 页面
 
 ```powershell
-cd D:\code-review-agent-workflow
 .\.venv\Scripts\python.exe web.py
 ```
 
@@ -196,18 +203,18 @@ workflow_started → review_agent_started → review_agent_finished
 
 ## 10. 错误处理与边界情况
 
-| 情况 | 系统行为 |
-|---|---|
-| 文件不存在 | 返回错误，不生成有效工作流结果 |
-| 路径越界 | 通过 `safe_path` 拒绝访问 |
-| 二进制文件 | 拒绝按文本处理 |
-| 模型输出不是 JSON | 反馈格式错误并重试一次 |
-| 修复结果为空 | 工作流报错并停止 |
-| 修复代码语法错误 | 记录验证失败，并进入下一轮或人工处理 |
-| 验证持续失败 | 最多两轮，最终状态为 `manual_review` |
-| 没有审查问题 | 跳过自动修复，保留原代码并进行本地语法检查 |
-| 模型调用失败 | 由 `llm.py` 进行最多三次指数退避重试 |
-| 上传文件超大或为二进制 | Web 上传接口拒绝请求 |
+| 情况                   | 系统行为                                   |
+| ---------------------- | ------------------------------------------ |
+| 文件不存在             | 返回错误，不生成有效工作流结果             |
+| 路径越界               | 通过 `safe_path` 拒绝访问                  |
+| 二进制文件             | 拒绝按文本处理                             |
+| 模型输出不是 JSON      | 反馈格式错误并重试一次                     |
+| 修复结果为空           | 工作流报错并停止                           |
+| 修复代码语法错误       | 记录验证失败，并进入下一轮或人工处理       |
+| 验证持续失败           | 最多两轮，最终状态为 `manual_review`       |
+| 没有审查问题           | 跳过自动修复，保留原代码并进行本地语法检查 |
+| 模型调用失败           | 由 `llm.py` 进行最多三次指数退避重试       |
+| 上传文件超大或为二进制 | Web 上传接口拒绝请求                       |
 
 ## 11. 已知限制
 
@@ -225,6 +232,3 @@ workflow_started → review_agent_started → review_agent_finished
 - 支持目录级、多文件依赖分析。
 - 将 Workflow 事件通过 SSE 实时推送到页面。
 - 增加人工确认节点、断点恢复和运行历史查询。
-=======
-# code-review-agent-workflow
->>>>>>> f22b013d60cf8e27d487f72190cf351eecb9c58d
