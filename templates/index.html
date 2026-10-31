@@ -207,10 +207,10 @@
           : reportHtml;
     
       } catch (err) {
-        reportEl.innerHTML = `
-             '<div class="step-title">Workflow 执行失败</div>';
+       traceEl.innerHTML =
+          '<div class="step-title">Workflow 执行失败</div>';
 
-        reportEl.innerHTML = 
+        reportEl.innerHTML = `
           <div class="error-box">
             Workflow 失败：${escapeHtml(err.message)}
           </div>
