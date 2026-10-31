@@ -127,6 +127,7 @@ def workflow():
             "ok": True,
             "status": result["status"],
             "run_id": result["run_id"],
+            "repair_round": result["repair_round"],
             "report": report,
             "diff": diff,
         })

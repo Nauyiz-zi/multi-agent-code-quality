@@ -91,7 +91,7 @@
 
 ### 3.2 代码修复智能体
 
-输入：原始代码、当前候选代码、审查问题列表和上一轮验证反馈。
+输入：原始代码、当前候选代码、原始审查问题、当前待修复问题和上一轮验证反馈。
 
 职责：只修复审查问题，尽量保持原接口和功能，不引入第三方依赖，并输出完整候选文件。
 
@@ -107,7 +107,7 @@
 
 ### 3.3 独立验证智能体
 
-输入：原始代码、候选修复代码和原始问题列表。
+输入：原始代码、候选修复代码、原始问题列表和上一轮待解决问题（包括后来发现的新问题）。
 
 职责：判断原问题是否解决、是否引入新问题以及是否保持基本功能。
 
@@ -123,30 +123,40 @@
 
 ## 4. 共享状态设计
 
-`workflow.py` 使用一个 Python 字典作为单次运行的共享状态，并在运行结束时写入 `state.json`。
+`workflow.py` 使用一个 Python 字典作为单次运行的共享状态，在初始化、阶段切换、审查结果更新、每轮验证结束及正常或异常退出时保存到 `state.json`。快照用于排查问题，目前不支持从快照恢复执行。
 
 ```python
 state = {
     "run_id": "运行编号",
-    "status": "running|passed|manual_review",
+    "status": "running|passed|manual_review|failed",
     "input_path": "输入文件路径",
     "original_code": "原始代码",
     "candidate_code": "当前候选代码",
     "findings": [],
     "review_summary": "审查总结",
     "repair_round": 0,
-    "verification_history": []
+    "verification_history": [],
+    "remaining_findings": [],
+    "stage": "initializing",
+    "error": ""
 }
 ```
 
 | 字段 | 写入者 | 读取者 | 作用 |
 |---|---|---|---|
 | `original_code` | 编排器 | 三个智能体 | 保存原始代码 |
-| `findings` | 审查智能体 | 修复、验证智能体 | 传递问题清单 |
+| `findings` | 审查阶段 | 修复、验证智能体和报告 | 保留原始问题清单，后续不覆盖 |
+| `remaining_findings` | 审查初始化、验证阶段 | 修复和验证智能体、报告 | 保存当前待解决问题，包括新发现的问题 |
 | `candidate_code` | 修复智能体 | 验证智能体、下一轮修复 | 保存最新候选代码 |
 | `verification_history` | 验证阶段 | 下一轮修复、报告生成 | 保存每轮结果和反馈 |
 | `repair_round` | 编排器 | 修复阶段、报告 | 控制最大轮次 |
-| `status` | 编排器 | Web、报告 | 表示工作流终态 |
+| `status` | 编排器 | Web、报告 | 表示正在运行、静态检查通过、需要人工复核或异常失败 |
+| `stage` | 编排器 | 诊断与日志 | 保存当前或失败阶段 |
+| `error` | 异常处理 | 诊断 | 保存异常类型与信息 |
+
+阶段依次涉及 `initializing`、`review`、`repair`、`syntax_check`、`verify`、`writing_outputs`、`completed`；分支会跳过部分阶段。
+`status=passed` 只表示本系统静态检查通过，不代表候选代码已通过功能测试。
+`status=manual_review` 表示修复预算耗尽或无问题分支中的语法检查失败；`status=failed` 表示受保护流程出现异常。
 
 ## 5. 流程控制
 
@@ -159,31 +169,39 @@ state = {
 
 ### 5.2 无问题分支
 
-当审查 Agent 返回空的 `findings` 时，系统跳过自动修复，保留原始代码作为候选代码，使用 `ast.parse` 进行本地语法检查。语法正确则状态为 `passed`，否则状态为 `manual_review`。
+当审查 Agent 返回空的 `findings` 时，系统跳过修复和验证 Agent，保留原始代码作为候选代码，使用 `ast.parse` 进行本地语法检查。语法正确则状态为 `passed`，否则状态为 `manual_review`。
 
 ### 5.3 验证失败分支
 
-当验证 Agent 返回 `passed=false` 时，系统保存 `feedback`，用 `remaining_findings` 更新问题列表，并进入下一轮修复。`MAX_REPAIR_ROUNDS` 当前为 2，超过上限则状态为 `manual_review`。
+当验证 Agent 返回 `passed=false` 时，系统保存 `feedback`，更新状态中的 `remaining_findings`，在验证历史中记录反馈和剩余问题，原始 `findings` 保持不变，再进入下一轮修复。`MAX_REPAIR_ROUNDS` 当前为 2，超过上限则状态为 `manual_review`。
 
 ### 5.4 语法失败分支
 
 修复 Agent 返回候选代码后，编排器先调用 `syntax_check`。如果 AST 解析失败，不调用验证智能体，而是把语法错误作为反馈传给下一轮修复。两轮仍失败则进入 `manual_review`。
 
+### 5.5 异常失败
+
+创建运行目录和初始状态后，受保护流程中的异常会将状态设为 `failed`，保存失败阶段及 `error`，追加 `workflow_failed` 事件，再向上抛出异常。
+此时不保证已经生成最终候选文件、差异或报告。输入文件读取失败发生在运行目录创建前，不保证生成运行记录；磁盘故障也可能使状态或日志无法保存。
+
 ## 6. 消息协议与模型调用
 
 三个智能体均通过 `workflow.py` 的 `call_json` 调用 `llm.chat`。每次调用使用独立的 system prompt 和 user prompt。
 
-`call_json` 的容错流程：
+`call_json(system_prompt, user_prompt, role)` 的容错流程：
 
-1. 发送角色 Prompt 和任务内容。
-2. 使用 `extract_json` 解析模型返回值。
-3. 解析失败时将错误反馈给模型。
-4. 最多重新请求一次。
-5. 连续失败后抛出异常，由上层 Web 或 CLI 捕获。
+1. 使用对应角色的提示词请求模型。
+2. 通过 `extract_json` 解析返回值，并通过 `validate_result` 检查协议。
+3. 顶层必须是对象；审查要求 `findings` 为对象列表、`summary` 为字符串；修复要求 `candidate_code` 为去除代码围栏后非空的字符串。
+4. 验证要求 `passed` 为真正的布尔值、`remaining_findings` 为对象列表、`feedback` 为字符串；通过时剩余问题必须为空。
+5. JSON 解析或字段校验失败时反馈错误并重试一次，连续失败则抛出异常。不得把字符串 `"false"` 转换成通过结果。
+6. API 异常由 `llm.py` 的调用重试处理；重试耗尽后向 Workflow 传播并记录失败。
+
+目前未校验每条问题对象的全部内部字段，模型静态判断仍可能误报或漏报。
 
 ## 7. 运行产物与可审计性
 
-每次运行生成唯一目录：
+输入读取成功后创建唯一运行目录，正常完成时包含：
 
 ```text
 runs/<run_id>/
@@ -206,7 +224,10 @@ repair_agent_finished
 verify_agent_started
 verify_agent_finished
 workflow_finished
+workflow_failed
 ```
+
+`workflow_finished` 与 `workflow_failed` 对应正常完成和异常退出；失败目录可能只包含原始代码、状态快照与已记录事件。
 
 ## 8. 模块职责
 
@@ -220,12 +241,12 @@ workflow_finished
 | `web.py` | 提供上传、旧版 `/review` 和新版 `/workflow` 接口 |
 | `templates/index.html` | 提供代码质量保障系统网页界面 |
 | `test_tools.py` | 测试工具层边界和安全行为 |
-| `test_workflow.py` | 测试 Workflow 使用的本地语法检查函数 |
+| `test_workflow.py` | 离线测试输出协议、状态流转、修复循环、异常留痕与产物 |
 
 ## 9. 安全性设计
 
 - 所有输入路径经过 `safe_path`，禁止访问项目根目录外的文件。
-- 文件读取限制大小，并检测二进制内容。
+- Web 上传限制为 1 MB；Workflow 直接读取项目内路径尚无大小上限。二进制判断使用前 1024 字节中的 NUL 字节检测。
 - 上传文件使用 UUID 文件名，避免直接使用用户原始文件名拼接路径。
 - 不执行候选代码，不调用任意 Shell 命令。
 - 候选代码写入独立的 `runs/<run_id>/fixed.py`，不覆盖原文件。
@@ -241,13 +262,17 @@ workflow_finished
 
 覆盖文件读取、搜索、路径越界、非法正则、二进制文件、未知工具和错误参数。
 
-### 10.2 Workflow 本地测试
+### 10.2 Workflow 离线测试
 
 ```powershell
-.\.venv\Scripts\python.exe test_workflow.py
+.\.venv\Scripts\python.exe -m unittest test_tools test_workflow -v
 ```
 
-覆盖合法 Python 和非法 Python 的 AST 检查。
+`test_workflow.py` 在隔离模块中加载真实 Workflow 和 JSON 解析代码，以模拟响应替代模型请求，绕过 API 客户端初始化，不需要密钥。使用临时目录保存测试产物，不执行候选代码。
+
+覆盖合法与非法语法、第一轮通过、第二轮通过、两轮失败转人工、语法失败跳过验证后重试、无问题分支、无问题但语法错误、缺字段重试、协议错误失败留痕、字符串 false 拒绝、API 故障留痕、原始问题保留与新问题传递、空修复结果以及通过与剩余问题矛盾。
+
+离线测试验证编排逻辑，不验证真实模型质量、供应商连接或浏览器交互。端到端和 Web 验收另行执行。
 
 ### 10.3 端到端验收
 
@@ -273,7 +298,7 @@ workflow_finished
 
 - 面向单个 Python 文件。
 - Web Workflow 请求同步等待，尚未实时展示每个事件。
-- `state.json` 用于记录结果，但尚未实现中断后的自动恢复。
+- `state.json` 保存阶段快照和失败信息，但尚未实现中断后的自动恢复，也未采用原子写入。
 - AST 检查没有执行程序行为测试。
 - 模型输出仍可能存在误报或漏报，需要人工复核。
 

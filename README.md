@@ -56,15 +56,29 @@ findings
 review_summary
 repair_round
 verification_history
+remaining_findings
+stage
+error
 ```
 
-状态值包括 `running`、`passed` 和 `manual_review`。
+状态含义如下：
+
+| 状态 | 含义 |
+|---|---|
+| `running` | 流程正在执行 |
+| `passed` | 审查未发现问题且语法检查通过，或候选代码通过语法检查和模型静态验证 |
+| `manual_review` | 两轮修复仍未通过，或无问题分支中的原始代码语法检查失败，需要人工复核 |
+| `failed` | 运行目录和初始状态创建后，受保护流程中出现异常 |
+
+`findings` 保留原始审查问题；`remaining_findings` 保存当前待解决问题；`verification_history` 保存每轮结果和反馈。
+`stage` 表示当前或失败阶段，`error` 保存异常信息。系统在初始化、阶段切换、审查结果更新、每轮验证结束以及正常或异常退出时保存 `state.json`。
+状态快照用于排查问题，尚未实现断点恢复。
 
 ### 3.3 安全的代码读取
 
 - 限制文件必须位于项目根目录内。
 - 拒绝路径越界访问。
-- 拒绝二进制文件并限制文件大小。
+- 拒绝包含 NUL 字节的二进制文件；Web 上传限制为 1 MB。Workflow 直接读取项目内路径时尚未设置大小上限。
 - 不执行用户上传的 Python 代码。
 - 使用 `ast.parse` 做语法检查，而不是直接运行候选代码。
 
@@ -87,7 +101,7 @@ code-review-agent-workflow/
 ├── main.py                  # 原有单文件审查 CLI 入口
 ├── examples/                # 演示代码
 ├── test_tools.py            # 工具层测试
-├── test_workflow.py         # Workflow 本地语法检查测试
+├── test_workflow.py         # Workflow 离线协议与流程测试
 ├── runs/                    # 每次运行生成的结果目录
 ├── uploads/                 # Web 上传文件目录
 ├── requirements.txt         # Python 依赖
@@ -108,7 +122,7 @@ Windows PowerShell：
 ```powershell
 py -3 -m venv .venv
 .\.venv\Scripts\Activate.ps1
-py -3 -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
 系统通过环境变量读取大模型服务配置。项目根目录提供 `.env.example` 作为配置模板；实际运行时需在本地创建 `.env` 文件，并根据所使用的模型服务选择一种配置方式。
@@ -162,13 +176,16 @@ LLM_MODEL=<model-name>
 ### 7.3 运行测试
 
 ```powershell
-.\.venv\Scripts\python.exe test_tools.py
-.\.venv\Scripts\python.exe test_workflow.py
+.\.venv\Scripts\python.exe -m unittest test_tools test_workflow -v
 ```
+
+工作流测试使用模拟模型响应，在临时目录保存产物，不调用真实 API，不需要 API Key，也不执行候选代码。
+覆盖正常通过、第二轮通过、两轮转人工、语法失败后重试、无问题分支、输出协议错误、API 故障留痕及原始问题保留。
+离线测试证明编排逻辑的行为，真实模型质量需通过端到端运行另行验证。
 
 ## 8. 运行产物
 
-每次运行会在 `runs/` 下创建独立目录：
+输入文件读取成功后，运行会在 `runs/` 下创建独立目录。正常完成时包含：
 
 ```text
 runs/<run_id>/
@@ -176,7 +193,7 @@ runs/<run_id>/
 ├── fixed.py          # 修复后的候选代码
 ├── changes.diff      # 原始代码与候选代码的统一差异
 ├── report.md         # 审查、修复和验证汇总报告
-├── state.json        # 工作流最终共享状态
+├── state.json        # 最近保存的工作流状态快照
 └── events.jsonl      # 按时间记录的执行事件
 ```
 
@@ -188,41 +205,44 @@ workflow_started → review_agent_started → review_agent_finished
 → verify_agent_started → verify_agent_finished → workflow_finished
 ```
 
+无问题分支会跳过修复和验证 Agent，语法失败的修复轮次会跳过验证 Agent。
+受保护流程出现异常时，记录 `workflow_failed`，保存 `status=failed`、失败阶段和错误信息，然后向调用方抛出异常；不会追加正常完成事件。
+失败运行可能没有 `fixed.py`、`changes.diff` 或 `report.md`。输入读取失败发生在运行目录创建之前，不保证存在状态和日志；磁盘不可写等存储故障也可能导致保存失败。
+
 ## 9. 典型运行流程
 
 1. 工作流读取原始 Python 文件。
 2. 代码审查智能体输出 `F001`、`F002` 等结构化问题。
-3. 编排器把问题列表写入共享状态 `findings`。
+3. 编排器把原始问题保存到 `findings`，并初始化 `remaining_findings`。
 4. 代码修复智能体读取问题列表，输出 `candidate_code`。
 5. 系统使用 `ast.parse` 检查候选代码语法。
 6. 独立验证智能体检查问题是否解决。
 7. 验证通过则状态为 `passed`。
-8. 验证不通过则保存反馈，并在下一轮传给修复智能体。
+8. 验证不通过则更新 `remaining_findings`，保存反馈并传给下一轮修复；原始 `findings` 保持不变。
 9. 两轮修复仍未通过则状态为 `manual_review`。
 10. 系统保存差异、状态、报告和事件日志。
 
 ## 10. 错误处理与边界情况
 
-| 情况                   | 系统行为                                   |
-| ---------------------- | ------------------------------------------ |
-| 文件不存在             | 返回错误，不生成有效工作流结果             |
-| 路径越界               | 通过 `safe_path` 拒绝访问                  |
-| 二进制文件             | 拒绝按文本处理                             |
-| 模型输出不是 JSON      | 反馈格式错误并重试一次                     |
-| 修复结果为空           | 工作流报错并停止                           |
-| 修复代码语法错误       | 记录验证失败，并进入下一轮或人工处理       |
-| 验证持续失败           | 最多两轮，最终状态为 `manual_review`       |
-| 没有审查问题           | 跳过自动修复，保留原代码并进行本地语法检查 |
-| 模型调用失败           | 由 `llm.py` 进行最多三次指数退避重试       |
-| 上传文件超大或为二进制 | Web 上传接口拒绝请求                       |
-
+| 情况 | 系统行为 |
+|---|---|
+| 文件不存在 | 返回错误，不生成有效工作流结果 |
+| 路径越界 | 通过 `safe_path` 拒绝访问 |
+| 二进制文件 | 拒绝按文本处理 |
+| JSON 格式、必填字段或字段类型不符合协议 | 反馈错误并重试一次；连续两次不符合协议则抛出异常 |
+| 修复结果为空 | 按输出协议错误重试一次，仍为空则失败并保存状态 |
+| 修复代码语法错误 | 记录验证失败，并进入下一轮或人工处理 |
+| 验证持续失败 | 最多两轮，最终状态为 `manual_review` |
+| 没有审查问题 | 跳过自动修复，保留原代码并进行本地语法检查 |
+| 模型调用失败 | `llm.py` 外层最多尝试 3 次并采用指数退避；仍失败则由 Workflow 保存失败状态和事件。SDK 可能另有内部重试 |
+| 上传文件超大或为二进制 | Web 上传接口拒绝请求 |
 ## 11. 已知限制
 
 1. 当前主要面向 Python 单文件代码。
 2. 候选代码不会直接覆盖原文件。
 3. 系统没有执行用户代码，静态验证不等同于完整测试。
 4. Workflow 网页接口是同步等待请求，长时间任务不适合生产环境。
-5. `state.json` 用于记录结果，但尚未实现中断后的自动恢复。
+5. `state.json` 保存阶段快照和失败信息，尚未实现中断后的自动恢复；保存并非原子写入。
 6. 修复质量受所配置的大模型能力影响，最终结果仍需人工复核。
 
 ## 12. 后续扩展

@@ -63,8 +63,6 @@
         <span id="upload-status"></span>
       </div>
       <div class="row">
-        <label>最大步数</label>
-        <input id="max-steps" type="number" min="1" max="20" value="8" style="width: 80px;">
         <button id="start-btn" type="button">运行</button>
       </div>
     </section>
@@ -84,11 +82,9 @@
     const pathInput = document.getElementById('path-input');
     const fileUpload = document.getElementById('file-upload');
     const uploadStatus = document.getElementById('upload-status');
-    const maxSteps = document.getElementById('max-steps');
     const startBtn = document.getElementById('start-btn');
     const traceEl = document.getElementById('trace');
     const reportEl = document.getElementById('report');
-    let currentStepBlock = null;
     let running = false;
 
     function escapeHtml(text) {
@@ -116,77 +112,6 @@
         uploadStatus.textContent = '上传失败：' + err.message;
       }
     });
-
-    function scrollTrace() {
-      traceEl.scrollTop = traceEl.scrollHeight;
-    }
-
-    function addStep(step) {
-      currentStepBlock = document.createElement('div');
-      currentStepBlock.className = 'step';
-      const title = document.createElement('div');
-      title.className = 'step-title';
-      title.innerHTML = '<span class="spinner"></span>第 ' + step + ' 步：正在推理…';
-      currentStepBlock.appendChild(title);
-      traceEl.appendChild(currentStepBlock);
-      scrollTrace();
-    }
-
-    function markStepDone() {
-      if (!currentStepBlock) return;
-      const spinner = currentStepBlock.querySelector('.spinner');
-      if (spinner) {
-        spinner.className = 'done-mark';
-        spinner.textContent = '✓';
-      }
-    }
-
-    function addRow(html, cls) {
-      if (!currentStepBlock) return;
-      markStepDone();
-      const row = document.createElement('div');
-      row.className = 'trace-row' + (cls ? ' ' + cls : '');
-      row.innerHTML = html;
-      currentStepBlock.appendChild(row);
-      scrollTrace();
-    }
-
-    function renderMarkdown(text) {
-      if (window.marked) {
-        let html = marked.parse(text);
-        html = window.DOMPurify
-          ? DOMPurify.sanitize(html)
-          : html.replace(/<script[\s\S]*?<\/script>/gi, '');
-        reportEl.innerHTML = html;
-      } else {
-        reportEl.innerHTML = '<pre>' + escapeHtml(text) + '</pre>';
-      }
-    }
-
-    function handleEvent(event) {
-      if (event.type === 'step_start') {
-        addStep(event.step);
-      } else if (event.type === 'tool_call') {
-        addRow('<span class="badge tool">' + escapeHtml(event.tool) + '</span>'
-          + '<code>' + escapeHtml(JSON.stringify(event.arguments)) + '</code>');
-      } else if (event.type === 'tool_result') {
-        addRow('<span class="badge ' + (event.ok ? 'ok' : 'fail') + '">'
-          + (event.ok ? 'ok ✓' : '失败 ✗') + '</span>');
-      } else if (event.type === 'parse_error') {
-        addRow('<span class="badge warn">模型输出异常</span>'
-          + escapeHtml(event.error) + '（已要求模型重新输出）');
-      } else if (event.type === 'done') {
-        markStepDone();
-        if (event.error) {
-          reportEl.innerHTML = '<div class="error-box">审查失败：'
-            + escapeHtml(event.error) + '</div>';
-        } else {
-          renderMarkdown(event.answer);
-        }
-        running = false;
-        startBtn.disabled = false;
-      }
-    }
 
     startBtn.addEventListener('click', async () => {
       const path = pathInput.value.trim();
@@ -235,34 +160,31 @@
           throw new Error(data.error || 'Workflow 执行失败');
         }
     
-        traceEl.innerHTML = `
+       traceEl.innerHTML = `
           <div class="step">
-            <div class="step-title">
-              <span class="done-mark">✓</span>
-              Workflow 执行完成
-            </div>
-    
+            <div class="step-title">Workflow 执行结束</div>
+        
             <div class="trace-row">
-              <span class="badge tool">代码审查智能体</span>
-              已生成结构化问题列表
-            </div>
-    
-            <div class="trace-row">
-              <span class="badge tool">代码修复智能体</span>
-              已生成候选修复代码
-            </div>
-    
-            <div class="trace-row">
-              <span class="badge tool">独立验证智能体</span>
-              验证状态：
+              最终状态：
               <span class="badge ${data.status === 'passed' ? 'ok' : 'warn'}">
-                ${escapeHtml(data.status)}
+                ${data.status === 'passed'
+                  ? '静态检查通过'
+                  : '需要人工复核'}
               </span>
             </div>
-    
+        
             <div class="trace-row">
-              运行编号：
-              <code>${escapeHtml(data.run_id)}</code>
+              修复轮次：${escapeHtml(String(data.repair_round))}
+            </div>
+        
+            <div class="trace-row">
+              ${data.repair_round === 0
+                ? '未发现待修复问题，已跳过修复和验证 Agent，仅执行本地语法检查。'
+                : '已执行修复流程，各轮验证结果见下方报告。'}
+            </div>
+        
+            <div class="trace-row">
+              运行编号：<code>${escapeHtml(data.run_id)}</code>
             </div>
           </div>
         `;
@@ -286,6 +208,9 @@
     
       } catch (err) {
         reportEl.innerHTML = `
+             '<div class="step-title">Workflow 执行失败</div>';
+
+        reportEl.innerHTML = 
           <div class="error-box">
             Workflow 失败：${escapeHtml(err.message)}
           </div>
