@@ -73,4 +73,6 @@ def chat(messages, tools=None, retries=3):
             if attempt < retries - 1:
                 time.sleep(2 ** attempt)
 
-    raise RuntimeError(f"LLM 调用失败，已重试 {retries} 次：{last_error}")
+    raise RuntimeError(
+    f"LLM 调用失败，共尝试 {retries} 次：{last_error}"
+    ) from last_error
